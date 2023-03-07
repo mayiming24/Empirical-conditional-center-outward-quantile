@@ -14,4 +14,4 @@ This repository contains the code (in R and matlab) needed to replicate the resu
 
 Details abut the files:
 
-Center_Outward_Quantile_Regression.Rmd  shows how to compute empirical quantile regression, where  includes three weight generation methods of kNN, kernel and random forest. We provide images and numerical metrics to demonstrate experimental results. We recommend using matlab to draw the regression tube after saving the data (matlab has stronger 3D drawing ability and tubeplot.m is the drawing file). mul_forest_x_3000_200_2.RData is the R worspace  when $n=3000,B=200$ and $m=2$.
+Center_Outward_Quantile_Regression.Rmd  shows how to compute empirical quantile regression, where  includes three weight generation methods of kNN, kernel and random forest. We provide images and numerical metrics to demonstrate experimental results. We recommend using matlab to draw the regression tube after saving the data (matlab has stronger 3D drawing ability ). mul_forest_x_3000_200_2.RData is the R worspace  when $n=3000,B=200$ and $m=2$. tubeplot.m is the drawing file and folder tubedata includes the quantile regression data. 
