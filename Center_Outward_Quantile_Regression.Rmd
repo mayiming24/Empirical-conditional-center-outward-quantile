@@ -1,0 +1,334 @@
+---
+title: "Center-Outward Quantile Regression"
+output:
+  html_document: default
+  pdf_document: default
+date: "2023-02-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This is a demonstration document showing how to implement Center-Outward Quantile Regression.
+
+## Data generation
+The following is the code for data generation:
+
+```{r}
+library(MASS)
+library(parallel)
+library(plot3D)
+library(transport)
+library(plotrix)
+set.seed(Sys.time())
+
+generatex<-function(n,d){ #$n$ is sample size and $d$ is the dimension of data
+  x=runif(n*d,min = -1,max = 1)
+  X=matrix(x,nrow = n,ncol = d)
+  return(X)
+}
+generatey<-function(x){
+  xsum=apply(abs(x), 1, sum)
+  n=length(x[,1])
+  Sigma <- matrix(c(1,0,0,1),2,2)
+  e=mvrnorm(n=n, rep(0, 2), Sigma)
+  xtemp=cbind(xsum^2,xsum^2)
+  temp=(xsum+0.4)*e
+  return(temp)
+}
+```
+
+We set the parameters $n=3000,d=2 $ visualize the data
+
+```{r}
+n=3000
+d=2
+x= generatex(n,d)
+y= generatey(x)    
+X=matrix(x,nrow = n)
+Y=matrix(y,nrow = n)
+y1= y[,1]
+y2= y[,2]
+load(file='D:/testdata/mul_forest_x_3000_200.RData') #This is the R workspace when n=3000, m=2 and B=200.
+scatter3D(x[,1], y1, y2,  type = "p",
+          phi = 10, theta = 10,
+          xlab='x',ylab='y1',zlab='y2',
+          col = 'blue',pch =10, cex = 0.1,  
+          ticktype = "detailed",bty = "b2")
+
+```
+
+This is the code to generate a uniform sphere
+```{r}
+generate_Grid<- function(nS,nR,n0){
+  Y=matrix(NA,2,nS*nR)
+  YY=array(NA,dim=c(2,nS,nR))
+  for (i in 1:nR) {
+    for (j in 1:nS) {
+      YY[1,j,i]=i/(nR+1)*cos(2*pi*(j-1)/nS)
+      YY[2,j,i]=i/(nR+1)*sin(2*pi*(j-1)/nS)
+    }
+    Y[,((i-1)*nS+1):(i*nS)] = YY[,,i]
+  }
+  Y0=matrix(0,2,n0)
+  return(cbind(Y0,Y))
+}
+```
+
+These are the code to create the empirical quantile countour
+```{r}
+opt_assign = function(data, grid){
+  size = length(data[1, ])
+  distMat = as.matrix(dist(rbind(t(data), t(grid))))
+  distMatsub = distMat[1:size, (size+1):(2*size)]^2
+  return(transport(rep(1, size), rep(1, size), costm = distMatsub, method = "networkflow")$to)
+}
+
+opt_qua = function(data,grid,weight){
+  l_data = length(data[1,])
+  l_grid = length(grid[1,])
+  dismat = as.matrix(dist(rbind(t(grid),t(data))))
+  subdist = dismat[1:l_grid,(l_grid+1):(l_data + l_grid) ]^2
+  return( transport(rep(1/l_grid, l_grid), weight,  costm = subdist, method = "networkflow") )
+}
+
+#transport from weights to unit sphere
+
+quantile_regions = function(tgrid,transdt,y){
+  l=length(tgrid)
+  out=matrix(rep(0,2*l),ncol=2)
+  for (i in 1:l) {
+    temp=transdt[ which(transdt$from==tgrid[i] ),]
+    temp=temp[which.max(temp$mass),]
+    if(length(temp$to)==1){
+      out[i,]=y[temp$to,]
+    }else{
+      ytemp=y[temp$to,]
+      yl=ytemp[,1]^2+ytemp[,2]^2
+      out[i,]=ytemp[which.min(yl),]
+    }
+  }
+  return(out)
+}
+
+```
+These part is  generating  weights
+```{r}
+#forest weights
+treeweight = function(tree , x ){
+  index=1
+  indexnow=1
+  lr=1
+  Threshold_value = tree[[1]]$Threshold_value
+  feature=tree[[1]]$Feature_number
+  while (!is.null( Threshold_value) ) {
+    node=tree[[indexnow]]
+    index=indexnow
+    if(x[feature]<Threshold_value){
+      indexnow = node[[5]][1]
+      lr=1
+    }else{
+      indexnow = node[[5]][2]
+      lr=2
+    }
+    Threshold_value = tree[[indexnow]]$Threshold_value
+    feature=tree[[indexnow]]$Feature_number
+  }
+  if(lr==1){
+    out=tree[[index]]$Idx_left
+  }else{
+    out=tree[[index]]$Idx_right
+  }
+  return(out)
+}
+
+forestweight = function(xtest,forest,ntree){
+  lx=n
+  ntree=length(forest)
+  result=matrix(rep(0,ntree*lx),nrow = ntree )  
+  for (i in 1:ntree) {
+    tree=forest[[i]][[1]]
+    index=forest[[i]][[2]]
+    out=treeweight(tree,xtest)
+    for (j in 1:length(out)) {
+      result[i,index[out[j]]]=result[i,index[out[j]]]+1
+    }
+  }
+  a=b=result
+  weight1=rep(0,n)
+  for (i in 1:length(a[,1])){
+    b[i,]=a[i,]/sum(a[i,])
+  }
+  for (i in 1:length(X[,1])){
+    weight1[i]=sum(b[,i])/ntree
+  }
+  return(weight1)
+}
+
+
+#kernel weights
+kernels=function(x,b){
+  #bandwidth
+  x=x/b
+  len=length(x[,1])
+  gaussian=1:len
+  for (i in 1:len) {
+    gaussian[i]=1/(sqrt(2*pi))*exp(-sum(x[i,]^2)/2)
+  }
+  return(gaussian)
+}
+kernelweights=function(X,Xtest,b){
+  Xtemp=X
+  for (j in 1:length(X[,1])) {
+    Xtemp[j,]=Xtemp[j,]- Xtest
+  }
+  K <-kernels(Xtemp,0.1)
+  Ksum <- sum(K)
+  weight1 <- K/Ksum
+  return(weight1)
+}
+
+
+# KNN weights
+euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+
+knnweight= function(xtest,X,N=50){
+  cdist= rep(0,length(X[,1]))
+  for (i in 1:length(X[,1])) {
+    cdist[i]=euc.dist(xtest,X[i,])
+  }
+  rank=order(cdist)
+  rank=rank[1:N]
+  weight=rep(0,length(X[,1]))
+  weight[rank]=1/N
+  return(weight)
+}
+```
+
+These part is  generating forest by parallel computation
+```{r,eval= FALSE}
+f<-function(k){
+  library(MultivariateRandomForest)
+  lx=length(X[,1])
+  index=sample(1:lx,replace = T,lx)
+  x=X[index,]
+  y=Y[index,]
+  x=matrix(x,nrow = lx)
+  y=matrix(y,nrow = lx)
+  Inv_Cov_Y = solve(cov(y))
+  tree=build_single_tree(x, y, m_feature =d, min_leaf= 100,
+                         Inv_Cov_Y= Inv_Cov_Y,Command = 2)
+  return(list(tree,index))
+}
+
+ntree=200
+out<-1:ntree
+cl <- makeCluster(8)
+clusterExport(cl,'X',envir = environment())
+clusterExport(cl,'Y',envir = environment())
+clusterExport(cl,'ntree',envir = environment())
+clusterExport(cl,'d',envir = environment())
+results <- parLapply(cl,out,f)
+res <- do.call('list',results)
+stopCluster(cl)
+```
+
+quantile contours
+
+```{r}
+N = 3001
+NR = 30
+NS = 100
+N0 = N-NR*NS
+Grid = generate_Grid(NS,NR,N0)
+
+xt1=0.7
+xt2=0.7
+xt=1.4
+
+weight1<-forestweight(c(xt1,xt2),res,ntree=ntree)
+
+#weight1<- knnweight(cbind(xt1,xt2),X)
+
+#weight1<-kernelweights(X,c(xt1 ,xt2),0.1)
+
+df=opt_qua(t(y),Grid,weight1)
+df=data.frame(df)
+
+tau = 0.6
+qt=quantile_regions((tau*NR*NS+N0+1):(tau*NR*NS+N0+NS),df,y)
+qt1=qt[order(atan2(qt[,1]-mean(qt[,1]),qt[,2]-mean(qt[,2]))),]
+qt2=rbind(qt1,qt1[1,])
+
+tau =0.4
+qqt=quantile_regions((tau*NR*NS+N0+1):(tau*NR*NS+N0+NS),df,y)
+qqt1=qqt[order(atan2(qqt[,1]-mean(qqt[,1]),qqt[,2]-mean(qqt[,2]))),]
+qqt2=rbind(qqt1,qqt1[1,])
+
+tau = 0.2
+qqqt=quantile_regions((tau*NR*NS+N0+1):(tau*NR*NS+N0+NS),df,y)
+qqqt1=qqqt[order(atan2(qqqt[,1]-mean(qqqt[,1]),qqqt[,2]-mean(qqqt[,2]))),]
+qqqt2=rbind(qqqt1,qqqt1[1,])
+
+c=2.6
+plot(qt2[,1],qt2[,2],type='l',asp=1,xlim = c(-c,c),ylim=c(-c,c),
+     xlab = expression(Y[1]),ylab = expression(Y[2]),lwd=2)
+
+lines(qqt2[,1],qqt2[,2],col=2,lwd=2,lty=1)
+lines(qqqt2[,1],qqqt2[,2],col=3,lwd=2,lty=1)
+
+
+draw.circle(0,0,1.333*(0.4+xt),lty=2,lwd = 2)
+draw.circle(0,0,1.011*(0.4+xt),lty=2,border = 2,lwd = 2)
+draw.circle(0,0,0.668*(0.4+xt),lty=2,border = 3,lwd = 2)
+```
+MSREC of $\tau=0.2,0.4,0.6$
+```{r}
+
+cat(mean(((qqqt[,1]^2+qqqt[,2]^2)^0.5 - (0.4+ xt)*0.668)^2  ),mean(((qqt[,1]^2+qqt[,2]^2)^0.5 - (0.4+ xt)*1.011)^2  )
+    ,mean(((qt[,1]^2+qt[,2]^2)^0.5 - (0.4+ xt)*1.333)^2  ))
+
+```
+quantile tube, 
+```{r,eval=FALSE}
+l_test=20
+x_test=seq (from = -0.9, to = 0.9, by = (1.8/ (l_test - 1 )))
+xres=matrix(NA,nrow = l_test,ncol = NS+1)
+yres=matrix(NA,nrow = l_test,ncol = NS+1)
+zres=matrix(NA,nrow = l_test,ncol = NS+1)
+
+for (i in 1:l_test) {
+  weight1<-kernelweights(X,c(x_test[i],0.5),0.1)
+  #weight1<-forestweight(c(x_test[i],0.5) ,res,ntree=ntree)
+  #weight1<- knnweight(cbind(x_test[i],0.5),X,50)
+  
+  df=opt_qua(t(y),Grid,weight1)
+  df=data.frame(df)
+  tau = 0.2
+  qt=quantile_regions((tau*NR*NS+N0+1):(tau*NR*NS+N0+NS),df,y)
+  qt1=qt[order(atan2(qt[,1]-mean(qt[,1]),qt[,2]-mean(qt[,2]))),]
+  qt2=rbind(qt1,qt1[1,])
+  xres[i,]=t(qt2[,1])
+  yres[i,]=t(qt2[,2])
+  zres[i,]=rep(x_test[i],times=length(qt2[,1]))
+}
+mse=0
+for (i in 1:length(xres[,1])){
+  for (j in 1:length(xres[1,])){
+    temp=(1/(abs(zres[i,j])+0.4+2))*((xres[i,j]-0)^2+(yres[i,j]-0)^2)^(0.5)
+    mse=mse+abs( temp-0.668)^2
+  }
+}
+print(mse/(length(xres[,1])*length(xres[1,]))) #This is the MSRET
+
+```
+We save the data and plot the tube in MATLAB
+```{r}
+# write.csv(t(xres),'D:/testdata/x_norm_02.csv', row.names = F)
+# write.csv(t(yres),'D:/testdata/y_norm_02.csv', row.names = F)
+# write.csv(t(zres),'D:/testdata/z_norm_02.csv', row.names = F)
+
+```
+
+
